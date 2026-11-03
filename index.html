@@ -253,6 +253,7 @@ select.input option{background:#1c1c22}
 .toast{position:fixed;z-index:90;left:50%;top:calc(var(--safe-t) + 12px);transform:translate(-50%,-140%);transition:transform .45s cubic-bezier(.3,1.4,.45,1);
   border-radius:999px;padding:12px 18px;font-size:14.5px;font-weight:550;display:flex;gap:8px;align-items:center;max-width:90vw}
 .toast.show{transform:translate(-50%,0)}
+.toastbtn{margin-left:6px;padding:6px 12px;border-radius:999px;background:rgba(255,214,10,.2);color:var(--accent);font-weight:650;font-size:14px;white-space:nowrap}
 .spin{width:44px;height:44px;border-radius:50%;border:3px solid rgba(255,255,255,.12);border-top-color:var(--accent);animation:spin 1s linear infinite;margin:0 auto 14px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .profile{display:flex;align-items:center;gap:14px;border-radius:28px;padding:18px;margin-top:6px}
@@ -479,10 +480,11 @@ function settle(root = document) {
   root.querySelectorAll('[data-to]').forEach(el => requestAnimationFrame(() => requestAnimationFrame(() => el.style.setProperty('--i', el.dataset.to))));
 }
 let toastT;
-function toast(msg, icon = 'circle-check') {
+function toast(msg, icon = 'circle-check', action) {
   const el = document.getElementById('toast');
-  el.innerHTML = ic(icon) + `<span>${esc(msg)}</span>`; icons();
-  el.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('show'), 2400);
+  el.innerHTML = ic(icon) + `<span>${esc(msg)}</span>` + (action ? `<button class="toastbtn">${esc(action.label)}</button>` : ''); icons();
+  if (action) el.querySelector('.toastbtn').onclick = () => { el.classList.remove('show'); action.fn(); };
+  el.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('show'), action ? 5000 : 2400);
 }
 
 const sheets = [];
@@ -1032,24 +1034,31 @@ const App = {
     if (!rows.length) { toast('Jumlahnya tidak terbaca, coba sebutkan angkanya', 'circle-help'); return; }
     App.applyAi(rows);
   },
-  /** Satu transaksi mengisi form (tinggal tekan ✓); beberapa transaksi langsung disimpan. */
+  /** Transaksi yang lengkap langsung disimpan dan form ditutup. Yang belum lengkap (mis. kategori tak dikenali) dibuka di form. */
   applyAi(rows) {
     rows = rows.map(r => ({ ...r, rekening: r.rekening || F.rekening }));
-    if (rows.length === 1) {
-      const r = rows[0];
+    const complete = r => r.jumlah > 0 && (r.tipe === 'transfer' ? r.rekening && r.rekeningTujuan && r.rekening !== r.rekeningTujuan : r.kategori && r.rekening);
+    const ok = rows.filter(complete), todo = rows.filter(r => !complete(r));
+    if (!ok.length) {
+      const r = todo[0];
       Object.assign(F, r, { expr: r.jumlah ? String(r.jumlah).replace('.', ',') : '0' });
       App.drawForm();
       sheets[sheets.length - 1].sh.querySelector('#aiq').value = '';
-      toast(r.tipe !== 'transfer' && !r.kategori ? 'Terisi. Pilih kategorinya lalu tekan ✓' : 'Terisi otomatis. Cek, lalu tekan ✓', 'sparkles');
+      toast(!r.jumlah ? 'Jumlahnya belum terbaca, isi lalu tekan ✓' : 'Kategorinya belum dikenali, pilih lalu tekan ✓', 'circle-help');
       return;
     }
-    const ok = rows.filter(r => r.jumlah > 0 && (r.tipe === 'transfer' ? r.rekening && r.rekeningTujuan && r.rekening !== r.rekeningTujuan : r.kategori && r.rekening));
-    if (!ok.length) { App.applyAi([rows[0]]); return; }
     const saved = ok.map(r => ({ id: uid(), ...r, dibuat: nowIso() }));
     saved.forEach(r => { S.tx.push(r); pendingTx.set(r.id, r); });
-    closeSheet(); render();
-    toast(`${saved.length} transaksi ditambahkan${ok.length < rows.length ? `, ${rows.length - ok.length} perlu diisi manual` : ''}`, 'sparkles');
+    closeSheet();
+    UI.month = som(parseD(saved[0].tanggal)); UI.tab = 'riwayat'; render();
+    const label = saved.length === 1 ? `${txView(saved[0]).title} ${fmt(saved[0].jumlah)} tersimpan` : `${saved.length} transaksi tersimpan`;
+    toast(label + (todo.length ? `, ${todo.length} perlu diisi manual` : ''), 'sparkles', { label: 'Batalkan', fn: () => App.undoAi(saved.map(r => r.id)) });
     persist(call('bulkUpsert', { sheet: 'tx', rows: saved }).finally(() => saved.forEach(r => pendingTx.delete(r.id))));
+  },
+  /** Batalkan transaksi yang baru disimpan otomatis oleh asisten. */
+  undoAi(ids) {
+    S.tx = S.tx.filter(t => !ids.includes(t.id)); render(); toast('Dibatalkan', 'undo-2');
+    ids.forEach(id => { pendingDel.add(id); pendingTx.delete(id); persist(call('delete', { sheet: 'tx', id }).finally(() => pendingDel.delete(id))); });
   },
   tokenSheet(auto) {
     if (auto && App._tokenOpen) return;
