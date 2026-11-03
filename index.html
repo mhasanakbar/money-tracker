@@ -850,7 +850,7 @@ const App = {
     closeSheet(); if (isNew) UI.month = som(parseD(row.tanggal)); render();
     toast(isNew ? 'Tersimpan ke Google Sheet' : 'Perubahan disimpan');
     pendingTx.set(row.id, row);
-    persist(call('upsert', { sheet: 'tx', row }).finally(() => pendingTx.delete(row.id)));
+    persist(call('upsert', { sheet: 'tx', row }).finally(() => pendingTx.delete(row.id)).then(() => reloadForVoice()));
   },
 
   /* ----- detail kategori ----- */
@@ -998,57 +998,40 @@ const App = {
   },
 
   /* ----- Asisten input: suara, foto, teks (semua diproses di HP, tanpa layanan AI berbayar) ----- */
-  /** Rekam suara lewat mikrofon (getUserMedia, bisa diulang), lalu ubah jadi teks di HP dengan Whisper. */
-  async aiMic() {
+  /** Pengenalan suara Apple (Safari). Di iPhone hanya bisa sekali per pemuatan halaman, jadi setelah dipakai halaman dimuat ulang otomatis. */
+  aiMic() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { toast('Browser ini belum mendukung input suara', 'mic-off'); return; }
     const V = App._voice || (App._voice = {});
-    if (V.stop) { V.stop(); return; }   // ketuk lagi = selesai bicara
-    if (V.busy) return;
-    const sh = sheets[sheets.length - 1].sh, q = sh.querySelector('#aiq'), btn = sh.querySelector('#aimic'), bar = sh.querySelector('#aibar');
-    if (!navigator.mediaDevices || !window.MediaRecorder) { toast('Browser ini belum mendukung rekam suara', 'mic-off'); return; }
-    const AC = window.AudioContext || window.webkitAudioContext;
-    const ac = new AC(); // dibuat langsung saat diketuk agar iOS mengizinkan audio
-    let stream;
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
-    catch (e) { ac.close(); toast(IN_GAS ? 'Mikrofon diblokir di halaman Google. Buka aplikasi lewat link utama.' : 'Izinkan mikrofon untuk situs ini di pengaturan Safari', 'mic-off'); return; }
-    getAsr(() => {}).catch(() => {}); // mulai siapkan model sambil Anda bicara
-    await ac.resume();
-    const an = ac.createAnalyser(); an.fftSize = 2048; ac.createMediaStreamSource(stream).connect(an);
-    const buf = new Float32Array(an.fftSize), chunks = [];
-    const mr = new MediaRecorder(stream);
-    mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-    let spoke = false, loudAt = Date.now(), noise = 0, n = 0;
-    const t0 = Date.now();
-    // Deteksi selesai bicara: 1,5 detik hening setelah ada suara, maksimal 15 detik.
-    const tick = setInterval(() => {
-      an.getFloatTimeDomainData(buf);
-      let s = 0; for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
-      const rms = Math.sqrt(s / buf.length), now = Date.now();
-      if (now - t0 < 300) { noise += rms; n++; return; }
-      const floor = n ? noise / n : 0;
-      if (rms > Math.max(0.012, floor * 3)) { spoke = true; loudAt = now; }
-      if ((spoke && now - loudAt > 1500) || now - t0 > 15000 || (!spoke && now - t0 > 7000)) stop();
-    }, 100);
-    const stop = () => { V.stop = null; if (mr.state !== 'inactive') mr.stop(); };
-    mr.onstop = async () => {
-      clearInterval(tick); stream.getTracks().forEach(tr => tr.stop()); ac.close();
-      btn.classList.remove('rec');
-      if (!spoke || !chunks.length) { toast('Tidak ada suara yang terdengar', 'mic-off'); return; }
-      V.busy = true; bar.classList.add('busy');
-      try {
-        toast('Mengubah suara jadi teks…', 'audio-lines');
-        const asr = await getAsr(pct => toast(`Mengunduh model suara ${pct}% (sekali saja)`, 'download'));
-        const pcm = await toMono16k(new Blob(chunks, { type: mr.mimeType || 'audio/mp4' }));
-        const out = await asr(pcm, { language: 'indonesian', task: 'transcribe' });
-        const text = String((out && out.text) || '').trim();
-        q.value = text;
-        if (text) App.aiRun(text); else toast('Suara tidak terbaca, coba lagi', 'mic-off');
-      } catch (e) { toast('Gagal mengenali suara: ' + (e.message || e), 'triangle-alert'); }
-      finally { V.busy = false; bar.classList.remove('busy'); }
+    if (V.finish) { V.finish(); return; } // ketuk lagi = selesai bicara
+    const sh = sheets[sheets.length - 1].sh, q = sh.querySelector('#aiq'), btn = sh.querySelector('#aimic');
+    const rec = new SR();
+    rec.lang = 'id-ID'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
+    let heard = '', done = false, timer;
+    const finish = () => {
+      if (done) return; done = true; V.finish = null; clearTimeout(timer); btn.classList.remove('rec');
+      try { rec.abort(); } catch (e) {}
+      App._voiceUsed = true;
+      if (heard.trim()) App.aiRun(heard.trim());
+      else { toast('Tidak ada suara yang terdengar', 'mic-off'); reloadForVoice(); }
     };
-    V.stop = stop;
-    mr.start(250);
+    V.finish = finish;
+    rec.onresult = e => {
+      heard = [...e.results].map(r => r[0].transcript).join(' '); q.value = heard;
+      clearTimeout(timer);
+      if (e.results[e.results.length - 1].isFinal) finish(); else timer = setTimeout(finish, 2000);
+    };
+    rec.onerror = e => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        done = true; V.finish = null; clearTimeout(timer); btn.classList.remove('rec');
+        toast(IN_GAS ? 'Mikrofon diblokir di halaman Google. Buka aplikasi lewat link utama.' : 'Izinkan mikrofon & pengenalan ucapan untuk situs ini', 'mic-off');
+      } else if (e.error !== 'aborted') finish();
+    };
+    rec.onend = () => finish();
     btn.classList.add('rec');
     toast('Mendengarkan… ucapkan transaksinya', 'mic');
+    timer = setTimeout(finish, 10000);
+    try { rec.start(); } catch (err) { finish(); }
   },
   async aiImage(file) {
     const sh = sheets[sheets.length - 1].sh, bar = sh.querySelector('#aibar'), extra = sh.querySelector('#aiq').value.trim();
@@ -1086,7 +1069,8 @@ const App = {
     UI.month = som(parseD(saved[0].tanggal)); UI.tab = 'riwayat'; render();
     const label = saved.length === 1 ? `${txView(saved[0]).title} ${fmt(saved[0].jumlah)} tersimpan` : `${saved.length} transaksi tersimpan`;
     toast(label + (todo.length ? `, ${todo.length} perlu diisi manual` : ''), 'sparkles', { label: 'Batalkan', fn: () => App.undoAi(saved.map(r => r.id)) });
-    persist(call('bulkUpsert', { sheet: 'tx', rows: saved }).finally(() => saved.forEach(r => pendingTx.delete(r.id))));
+    persist(call('bulkUpsert', { sheet: 'tx', rows: saved }).finally(() => saved.forEach(r => pendingTx.delete(r.id)))
+      .then(() => reloadForVoice({ ids: saved.map(r => r.id), label })));
   },
   /** Batalkan transaksi yang baru disimpan otomatis oleh asisten. */
   undoAi(ids) {
@@ -1347,34 +1331,11 @@ function parseReceipt(text) {
   }
   return { tipe: 'expense', jumlah, kategori, rekening: accs[0] ? accs[0].a.id : '', rekeningTujuan: '', catatan: merchant.slice(0, 40), tanggal };
 }
-let asrPipe = null, asrProgress = () => {};
-/** Model Whisper (base, terkuantisasi) dijalankan di HP lewat transformers.js. Diunduh sekali ±80 MB lalu disimpan di cache. */
-function getAsr(onProgress) {
-  asrProgress = onProgress;
-  if (!asrPipe) asrPipe = (async () => {
-    const { pipeline, env } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.0.2');
-    env.allowLocalModels = false;
-    const seen = {};
-    return pipeline('automatic-speech-recognition', 'onnx-community/whisper-base', {
-      dtype: 'q8', device: 'wasm',
-      progress_callback: p => {
-        if (p.status !== 'progress' || !p.total) return;
-        seen[p.file] = [p.loaded, p.total];
-        const v = Object.values(seen), done = v.reduce((x, y) => x + y[0], 0), all = v.reduce((x, y) => x + y[1], 0);
-        if (all > 5e6) asrProgress(Math.round(done / all * 100));
-      }
-    });
-  })().catch(e => { asrPipe = null; throw e; });
-  return asrPipe;
-}
-/** Rekaman (mp4/webm) → Float32Array mono 16 kHz untuk Whisper. */
-async function toMono16k(blob) {
-  const AC = window.AudioContext || window.webkitAudioContext, ac = new AC();
-  const audio = await new Promise((res, rej) => blob.arrayBuffer().then(b => ac.decodeAudioData(b, res, rej), rej));
-  ac.close();
-  const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(audio.duration * 16000)), 16000);
-  const src = off.createBufferSource(); src.buffer = audio; src.connect(off.destination); src.start();
-  return (await off.startRendering()).getChannelData(0);
+/** Setelah input suara tersimpan, muat ulang halaman agar mikrofon siap lagi (batasan Safari iPhone). Tombol Batalkan tetap muncul. */
+function reloadForVoice(undo) {
+  if (!App._voiceUsed || !REMOTE) return;
+  try { if (undo) sessionStorage.setItem('mt_undo', JSON.stringify({ ...undo, until: Date.now() + 6000 })); } catch (e) {}
+  setTimeout(() => location.reload(), undo ? 600 : 1200);
 }
 let ocrWorker = null;
 /** OCR di HP dengan Tesseract.js (gratis). Pertama kali mengunduh data bahasa ±10 MB, lalu tersimpan di cache. */
@@ -1429,6 +1390,10 @@ const fromCache = loadCache();
 if (!fromCache) applyFallback();
 render();
 App.openForm();
+try { // tombol Batalkan untuk transaksi suara yang tersimpan sebelum halaman dimuat ulang
+  const u = JSON.parse(sessionStorage.getItem('mt_undo') || 'null'); sessionStorage.removeItem('mt_undo');
+  if (u && u.until > Date.now()) toast(u.label, 'sparkles', { label: 'Batalkan', fn: () => App.undoAi(u.ids) });
+} catch (e) {}
 if (IN_GAS) google.script.url.getLocation(l => { if (takeTokenFromHash(l.hash)) load().catch(() => {}); });
 load().catch(err => toast((fromCache ? 'Offline: menampilkan data tersimpan' : 'Gagal memuat data: ' + err.message), 'cloud-off'));
 </script>
