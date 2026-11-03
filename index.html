@@ -1007,30 +1007,28 @@ const App = {
     const sh = sheets[sheets.length - 1].sh, q = sh.querySelector('#aiq'), btn = sh.querySelector('#aimic');
     const rec = new SR();
     rec.lang = 'id-ID'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
-    let heard = '', done = false, timer;
+    let heard = '', done = false, timer, endTimer;
+    // Hasil diproses setelah Apple selesai (onend), seperti dikte biasa, supaya kalimatnya lengkap dan akurat.
     const finish = () => {
-      if (done) return; done = true; V.finish = null; clearTimeout(timer); btn.classList.remove('rec');
-      try { rec.abort(); } catch (e) {}
+      if (done) return; done = true; V.finish = null; clearTimeout(timer); clearTimeout(endTimer); btn.classList.remove('rec');
       App._voiceUsed = true;
       if (heard.trim()) App.aiRun(heard.trim());
       else { toast('Tidak ada suara yang terdengar', 'mic-off'); reloadForVoice(); }
     };
-    V.finish = finish;
-    rec.onresult = e => {
-      heard = [...e.results].map(r => r[0].transcript).join(' '); q.value = heard;
-      clearTimeout(timer);
-      if (e.results[e.results.length - 1].isFinal) finish(); else timer = setTimeout(finish, 2000);
-    };
+    // Ketuk lagi / batas waktu: minta Apple menyelesaikan (stop, bukan abort), lalu tunggu onend sebentar.
+    const requestStop = () => { try { rec.stop(); } catch (e) {} clearTimeout(endTimer); endTimer = setTimeout(finish, 2500); };
+    V.finish = requestStop;
+    rec.onresult = e => { heard = [...e.results].map(r => r[0].transcript).join(' ').replace(/\s+/g, ' '); q.value = heard; };
     rec.onerror = e => {
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         done = true; V.finish = null; clearTimeout(timer); btn.classList.remove('rec');
         toast(IN_GAS ? 'Mikrofon diblokir di halaman Google. Buka aplikasi lewat link utama.' : 'Izinkan mikrofon & pengenalan ucapan untuk situs ini', 'mic-off');
-      } else if (e.error !== 'aborted') finish();
+      }
     };
     rec.onend = () => finish();
     btn.classList.add('rec');
     toast('Mendengarkan… ucapkan transaksinya', 'mic');
-    timer = setTimeout(finish, 10000);
+    timer = setTimeout(requestStop, 15000);
     try { rec.start(); } catch (err) { finish(); }
   },
   async aiImage(file) {
