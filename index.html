@@ -488,7 +488,7 @@ function toast(msg, icon = 'circle-check', action) {
 }
 
 const sheets = [];
-function openSheet(html, { full = false, onClose } = {}) {
+function openSheet(html, { full = false, onClose, instant = false } = {}) {
   const scrim = document.createElement('div'); scrim.className = 'scrim';
   const sh = document.createElement('div'); sh.className = 'sheet' + (full ? ' full' : '');
   sh.innerHTML = `<div class="grab"></div>` + html;
@@ -496,7 +496,11 @@ function openSheet(html, { full = false, onClose } = {}) {
   document.body.append(scrim, sh);
   sheets.push({ scrim, sh, onClose });
   settle(sh);
-  requestAnimationFrame(() => requestAnimationFrame(() => { scrim.classList.add('show'); sh.classList.add('show'); }));
+  if (instant) { // tanpa animasi: tombol langsung di posisi akhirnya, jadi sentuhan pertama tidak meleset
+    scrim.style.transition = sh.style.transition = 'none';
+    scrim.classList.add('show'); sh.classList.add('show');
+    requestAnimationFrame(() => requestAnimationFrame(() => { scrim.style.transition = sh.style.transition = ''; }));
+  } else requestAnimationFrame(() => requestAnimationFrame(() => { scrim.classList.add('show'); sh.classList.add('show'); }));
   enableDrag(sh);
   return sh;
 }
@@ -757,13 +761,13 @@ const App = {
   },
 
   /* ----- form transaksi ----- */
-  openForm(id) {
+  openForm(id, instant) {
     const t = id && S.tx.find(x => x.id === id);
     const last = (() => { try { return localStorage.getItem('mt_lastAcc'); } catch (e) { return null; } })();
     const defAcc = (accById(last) || accsSorted()[0] || {}).id || '';
     F = t ? { ...t, expr: String(t.jumlah).replace('.', ',') }
       : { id: '', tipe: 'expense', kategori: '', rekening: defAcc, rekeningTujuan: '', expr: '0', catatan: '', tanggal: today() };
-    openSheet('', { full: true }); App.drawForm();
+    openSheet('', { full: true, instant }); App.drawForm();
   },
   drawForm() {
     const a = accById(F.rekening), to = accById(F.rekeningTujuan);
@@ -1387,7 +1391,10 @@ let cacheT;
 const fromCache = loadCache();
 if (!fromCache) applyFallback();
 render();
-App.openForm();
+// Safari iPhone menggeser area sentuh elemen melayang bila posisi scroll dipulihkan setelah muat ulang.
+if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+window.scrollTo(0, 0);
+App.openForm(null, true);
 try { // tombol Batalkan untuk transaksi suara yang tersimpan sebelum halaman dimuat ulang
   const u = JSON.parse(sessionStorage.getItem('mt_undo') || 'null'); sessionStorage.removeItem('mt_undo');
   if (u && u.until > Date.now()) toast(u.label, 'sparkles', { label: 'Batalkan', fn: () => App.undoAi(u.ids) });
