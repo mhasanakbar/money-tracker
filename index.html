@@ -1000,22 +1000,48 @@ const App = {
   /* ----- Asisten input: suara, foto, teks (semua diproses di HP, tanpa layanan AI berbayar) ----- */
   aiMic() {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const sh = sheets[sheets.length - 1].sh, q = sh.querySelector('#aiq'), btn = sh.querySelector('#aimic');
-    if (App._rec) { App._rec.stop(); return; }
     if (!SR) { toast('Browser ini belum mendukung input suara', 'mic-off'); return; }
-    const rec = new SR(); App._rec = rec;
+    const sh = sheets[sheets.length - 1].sh, q = sh.querySelector('#aiq'), btn = sh.querySelector('#aimic');
+    const V = App._voice || (App._voice = { rec: null, on: false });
+    if (V.on) { V.finish && V.finish(); return; } // ketuk lagi = selesai bicara
+    // Safari iOS sering gagal bila pengenal suara dibuat ulang, jadi satu objek dipakai ulang untuk setiap sesi.
+    const rec = V.rec || (V.rec = new SR());
     rec.lang = 'id-ID'; rec.interimResults = true; rec.continuous = false; rec.maxAlternatives = 1;
-    let heard = '';
-    rec.onresult = e => { heard = [...e.results].map(r => r[0].transcript).join(' '); q.value = heard; };
-    rec.onerror = e => {
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed')
-        toast(IN_GAS ? 'Mikrofon diblokir di halaman Google. Buka aplikasi lewat link utama.' : 'Izinkan mikrofon & pengenalan ucapan di pengaturan Safari', 'mic-off');
-      else if (e.error !== 'no-speech' && e.error !== 'aborted') toast('Suara tidak terbaca: ' + e.error, 'mic-off');
+    let heard = '', done = false, timer;
+    const reset = () => { V.on = false; V.finish = null; clearTimeout(timer); btn.classList.remove('rec'); };
+    // Selesai sekali saja: dari hasil final, onend, ketukan ulang, atau batas waktu (onend kadang tidak datang di iOS).
+    const finish = () => {
+      if (done) return; done = true; reset();
+      V.sid++; try { rec.abort(); } catch (e) {}
+      if (heard.trim()) App.aiRun(heard.trim()); else toast('Tidak ada suara yang terdengar', 'mic-off');
     };
-    rec.onend = () => { App._rec = null; btn.classList.remove('rec'); if (heard.trim()) App.aiRun(heard.trim()); };
-    btn.classList.add('rec');
+    V.finish = finish;
+    // Setiap sesi punya ID; event sisa dari sesi lama (mis. onend akibat abort) diabaikan.
+    const bind = () => {
+      const sid = V.sid = (V.sid || 0) + 1, live = () => sid === V.sid;
+      rec.onresult = e => {
+        if (!live()) return;
+        heard = [...e.results].map(r => r[0].transcript).join(' '); q.value = heard;
+        if (e.results[e.results.length - 1].isFinal) finish();
+        else { clearTimeout(timer); timer = setTimeout(finish, 2500); } // jeda bicara 2,5 detik = selesai
+      };
+      rec.onerror = e => {
+        if (!live()) return;
+        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+          done = true; reset();
+          toast(IN_GAS ? 'Mikrofon diblokir di halaman Google. Buka aplikasi lewat link utama.' : 'Izinkan mikrofon & pengenalan ucapan di pengaturan Safari', 'mic-off');
+        } else if (e.error !== 'aborted') finish();
+      };
+      rec.onend = () => { if (live()) finish(); };
+    };
+    V.on = true; btn.classList.add('rec');
     toast('Mendengarkan… ucapkan transaksinya', 'mic');
-    try { rec.start(); } catch (err) { App._rec = null; btn.classList.remove('rec'); toast('Mikrofon tidak bisa dibuka', 'mic-off'); }
+    timer = setTimeout(finish, 10000);
+    try { bind(); rec.start(); }
+    catch (err) { // masih dianggap aktif dari sesi sebelumnya: hentikan, lalu mulai lagi
+      V.sid++; try { rec.abort(); } catch (e) {}
+      setTimeout(() => { try { bind(); rec.start(); } catch (e2) { V.rec = null; done = true; reset(); toast('Mikrofon tidak bisa dibuka, coba lagi', 'mic-off'); } }, 300);
+    }
   },
   async aiImage(file) {
     const sh = sheets[sheets.length - 1].sh, bar = sh.querySelector('#aibar'), extra = sh.querySelector('#aiq').value.trim();
