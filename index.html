@@ -1336,7 +1336,10 @@ function parseReceipt(text) {
 /** Setelah input suara tersimpan, muat ulang halaman agar mikrofon siap lagi (batasan Safari iPhone). Tombol Batalkan tetap muncul. */
 function reloadForVoice(undo) {
   if (!App._voiceUsed || !REMOTE) return;
-  try { if (undo) sessionStorage.setItem('mt_undo', JSON.stringify({ ...undo, until: Date.now() + 6000 })); } catch (e) {}
+  try {
+    if (undo) sessionStorage.setItem('mt_undo', JSON.stringify({ ...undo, until: Date.now() + 6000 }));
+    sessionStorage.setItem('mt_after_voice', '1'); // setelah dimuat ulang, tampilkan Riwayat (bukan form Tambah)
+  } catch (e) {}
   setTimeout(() => location.reload(), undo ? 600 : 1200);
 }
 let ocrWorker = null;
@@ -1394,7 +1397,9 @@ render();
 // Safari iPhone menggeser area sentuh elemen melayang bila posisi scroll dipulihkan setelah muat ulang.
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
 window.scrollTo(0, 0);
-App.openForm(null, true);
+let afterVoice = false;
+try { afterVoice = sessionStorage.getItem('mt_after_voice') === '1'; sessionStorage.removeItem('mt_after_voice'); } catch (e) {}
+if (!afterVoice) App.openForm(null, true);
 try { // tombol Batalkan untuk transaksi suara yang tersimpan sebelum halaman dimuat ulang
   const u = JSON.parse(sessionStorage.getItem('mt_undo') || 'null'); sessionStorage.removeItem('mt_undo');
   if (u && u.until > Date.now()) toast(u.label, 'sparkles', { label: 'Batalkan', fn: () => App.undoAi(u.ids) });
